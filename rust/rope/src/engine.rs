@@ -27,7 +27,8 @@ use delta::Delta;
 
 pub struct Engine {
     rev_id_counter: usize,
-    union_str: Rope,
+    text: Rope,
+    tombstones: Rope,
     revs: Vec<Revision>,
 }
 
@@ -62,7 +63,8 @@ impl Engine {
         };
         Engine {
             rev_id_counter: 1,
-            union_str: initial_contents,
+            text: initial_contents,
+            tombstones: Rope::default(),
             revs: vec![rev],
         }
     }
@@ -87,7 +89,11 @@ impl Engine {
 
     /// Get the contents of the document at a given revision number
     fn rev_content_for_index(&self, rev_index: usize) -> Rope {
-        self.deletes_from_union_for_index(rev_index).delete_from(&self.union_str)
+        let old_deletes_from_union = self.deletes_from_union_for_index(rev_index);
+        let head_rev = &self.revs.last().unwrap();
+        let delta = Delta::synthesize(&self.tombstones, &head_rev.deletes_from_union, head_rev.union_str_len,
+            &head_rev.deletes_from_union, &old_deletes_from_union);
+        delta.apply(&self.text)
     }
 
     /// Get the Subset to delete from the current union string in order to obtain a revision's content
@@ -110,7 +116,7 @@ impl Engine {
 
     /// Get text of head revision.
     pub fn get_head(&self) -> Rope {
-        self.rev_content_for_index(self.revs.len() - 1)
+        self.text.clone()
     }
 
     /// Get text of a given revision, if it can be found.
@@ -140,11 +146,13 @@ impl Engine {
         }
 
         let head_rev = &self.revs.last().unwrap();
-        Delta::synthesize(&self.union_str, &prev_from_union, &head_rev.deletes_from_union)
+        Delta::synthesize(&self.tombstones, &head_rev.deletes_from_union, head_rev.union_str_len,
+            &prev_from_union, &head_rev.deletes_from_union)
     }
 
+    // TODO: don't construct transform if subsets are empty
     fn mk_new_rev(&self, new_priority: usize, undo_group: usize,
-            base_rev: usize, delta: Delta<RopeInfo>) -> (Revision, Rope) {
+            base_rev: usize, delta: Delta<RopeInfo>) -> (Revision, Rope, Rope) {
         let ix = self.find_rev(base_rev).expect("base revision not found");
         let rev = &self.revs[ix];
         let (ins_delta, deletes) = delta.factor();
@@ -170,41 +178,61 @@ impl Engine {
             new_deletes = new_deletes.transform_expand(&new_inserts);
         }
 
-        let new_union_str = union_ins_delta.apply(&self.union_str);
+        // rebase insertions on text and apply
+        let cur_deletes_from_union = &self.revs.last().unwrap().deletes_from_union;
+        let text_ins_delta = union_ins_delta.transform_shrink(cur_deletes_from_union);
+        let text_with_inserts = text_ins_delta.apply(&self.text);
+        let rebased_deletes_from_union = cur_deletes_from_union.transform_expand(&new_inserts);
+
         // is the new edit in an undo group that was already undone due to concurrency?
         let undone = self.get_current_undo().map_or(false, |undos| undos.contains(&undo_group));
-        let mut new_deletes_from_union = Cow::Borrowed(&self.revs.last().unwrap().deletes_from_union);
-        if undone {
-            if !new_inserts.is_empty() {
-                new_deletes_from_union = Cow::Owned(new_deletes_from_union.transform_union(&new_inserts));
-            }
-        } else {
-            if !new_inserts.is_empty() {
-                new_deletes_from_union = Cow::Owned(new_deletes_from_union.transform_expand(&new_inserts));
-            }
-            if !new_deletes.is_empty() {
-                new_deletes_from_union = Cow::Owned(new_deletes_from_union.union(&new_deletes));
-            }
-        }
+        let new_deletes_from_union = {
+            let to_delete = if undone { &new_inserts } else { &new_deletes };
+            rebased_deletes_from_union.union(to_delete)
+        };
+
+        // move deleted or undone-inserted things from text to tombstones
+        let (new_text, new_tombstones) = Engine::shuffle(&text_with_inserts, &self.tombstones,
+            &rebased_deletes_from_union, &new_deletes_from_union);
+
         (Revision {
             rev_id: self.rev_id_counter,
-            deletes_from_union: new_deletes_from_union.into_owned(),
-            union_str_len: new_union_str.len(),
+            deletes_from_union: new_deletes_from_union,
+            union_str_len: union_ins_delta.new_document_len(),
             edit: Edit {
                 priority: new_priority,
                 undo_group: undo_group,
                 inserts: new_inserts,
                 deletes: new_deletes,
             }
-        }, new_union_str)
+        }, new_text, new_tombstones)
+    }
+
+    /// Move sections from text to tombstones and vice versa based on a new and old set of deletions
+    fn shuffle(text: &Rope, tombstones: &Rope,
+            old_deletes_from_union: &Subset, new_deletes_from_union: &Subset) -> (Rope,Rope) {
+        let union_len = text.len() + tombstones.len();
+        // Delta that deletes the right bits from the text
+        let del_delta = Delta::synthesize(tombstones, old_deletes_from_union, union_len,
+            old_deletes_from_union, new_deletes_from_union);
+        let new_text = del_delta.apply(text);
+        // Taking the complement of deletes_from_union leads to an interleaving valid for swapped text and tombstones,
+        // allowing us to use the same method to insert the text into the tombstones.
+        let total_len = text.len() + tombstones.len();
+        let inverse_tombstones_map = old_deletes_from_union.complement(total_len);
+        let move_delta = Delta::synthesize(text, &inverse_tombstones_map, union_len,
+            &inverse_tombstones_map, &new_deletes_from_union.complement(total_len));
+        let new_tombstones = move_delta.apply(tombstones);
+        (new_text, new_tombstones)
     }
 
     pub fn edit_rev(&mut self, priority: usize, undo_group: usize,
             base_rev: usize, delta: Delta<RopeInfo>) {
-        let (new_rev, new_union_str) = self.mk_new_rev(priority, undo_group, base_rev, delta);
+        let (new_rev, new_text, new_tombstones) = self.mk_new_rev(priority, undo_group, base_rev, delta);
         self.rev_id_counter += 1;
         self.revs.push(new_rev);
-        self.union_str = new_union_str;
+        self.text = new_text;
+        self.tombstones = new_tombstones;
     }
 
     // This computes undo all the way from the beginning. An optimization would be to not
@@ -228,10 +256,11 @@ impl Engine {
                 }
             }
         }
+        let head_rev = &self.revs.last().unwrap();
         Revision {
             rev_id: self.rev_id_counter,
             deletes_from_union: deletes_from_union,
-            union_str_len: self.union_str.len(),
+            union_str_len: head_rev.union_str_len,
             edit: Undo {
                 groups: groups
             }
@@ -290,7 +319,10 @@ impl Engine {
             }
         }
         if !gc_dels.is_empty() {
-            self.union_str = gc_dels.delete_from(&self.union_str);
+            let head_rev = &self.revs.last().unwrap();
+            let not_in_tombstones = head_rev.deletes_from_union.complement(head_rev.union_str_len);
+            let dels_from_tombstones = gc_dels.transform_shrink(&not_in_tombstones);
+            self.tombstones = dels_from_tombstones.delete_from(&self.tombstones);
         }
         let old_revs = std::mem::replace(&mut self.revs, Vec::new());
         for rev in old_revs.into_iter().rev() {
