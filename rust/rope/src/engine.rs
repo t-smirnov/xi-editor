@@ -228,6 +228,8 @@ impl Engine {
         // Delta that deletes the right bits from the text
         let del_delta = Delta::synthesize(tombstones, union_len, old_deletes_from_union, new_deletes_from_union);
         let new_text = del_delta.apply(text);
+        // println!("shuffle: old={:?} new={:?} old_text={:?} new_text={:?} old_tombstones={:?}",
+        //     old_deletes_from_union, new_deletes_from_union, text, new_text, tombstones);
         (new_text, Engine::shuffle_tombstones(text,tombstones,old_deletes_from_union,new_deletes_from_union))
     }
 
@@ -508,5 +510,19 @@ mod tests {
     #[test]
     fn undo_3() {
         undo_test(false, [0].iter().cloned().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
+    }
+
+    #[test]
+    fn undo_4() {
+        let mut engine = Engine::new(Rope::from(TEST_STR));
+        let d1 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("a"), TEST_STR.len());
+        engine.edit_rev(1, 0, 0, d1.clone());
+        engine.undo([0].iter().cloned().collect());
+        let d2 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("a"), TEST_STR.len()+1);
+        engine.edit_rev(1, 1, 1, d2);
+        let d3 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("b"), TEST_STR.len()+2);
+        engine.edit_rev(1, 2, 2, d3);
+        engine.undo([0,2].iter().cloned().collect());
+        assert_eq!("a0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
 }
