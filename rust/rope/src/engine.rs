@@ -91,7 +91,7 @@ impl Engine {
     fn rev_content_for_index(&self, rev_index: usize) -> Rope {
         let old_deletes_from_union = self.deletes_from_union_for_index(rev_index);
         let head_rev = &self.revs.last().unwrap();
-        let delta = Delta::synthesize(&self.tombstones, &head_rev.deletes_from_union, head_rev.union_str_len,
+        let delta = Delta::synthesize(&self.tombstones, head_rev.union_str_len,
             &head_rev.deletes_from_union, &old_deletes_from_union);
         delta.apply(&self.text)
     }
@@ -146,8 +146,9 @@ impl Engine {
         }
 
         let head_rev = &self.revs.last().unwrap();
-        Delta::synthesize(&self.tombstones, &head_rev.deletes_from_union, head_rev.union_str_len,
-            &prev_from_union, &head_rev.deletes_from_union)
+        // TODO: this does 3 calls to Delta::synthesize and 2 to apply, this should definitely be better.
+        let old_tombstones = Engine::shuffle_tombstones(&self.text, &self.tombstones, &head_rev.deletes_from_union, &prev_from_union);
+        Delta::synthesize(&old_tombstones, head_rev.union_str_len, &prev_from_union, &head_rev.deletes_from_union)
     }
 
     // TODO: don't construct transform if subsets are empty
@@ -207,23 +208,26 @@ impl Engine {
             }
         }, new_text, new_tombstones)
     }
+    /// Move sections from text to tombstones and out of tombstones based on a new and old set of deletions
+    fn shuffle_tombstones(text: &Rope, tombstones: &Rope,
+            old_deletes_from_union: &Subset, new_deletes_from_union: &Subset) -> Rope {
+        // Taking the complement of deletes_from_union leads to an interleaving valid for swapped text and tombstones,
+        // allowing us to use the same method to insert the text into the tombstones.
+        let union_len = text.len() + tombstones.len();
+        let inverse_tombstones_map = old_deletes_from_union.complement(union_len);
+        let move_delta = Delta::synthesize(text, union_len,
+            &inverse_tombstones_map, &new_deletes_from_union.complement(union_len));
+        move_delta.apply(tombstones)
+    }
 
     /// Move sections from text to tombstones and vice versa based on a new and old set of deletions
     fn shuffle(text: &Rope, tombstones: &Rope,
             old_deletes_from_union: &Subset, new_deletes_from_union: &Subset) -> (Rope,Rope) {
         let union_len = text.len() + tombstones.len();
         // Delta that deletes the right bits from the text
-        let del_delta = Delta::synthesize(tombstones, old_deletes_from_union, union_len,
-            old_deletes_from_union, new_deletes_from_union);
+        let del_delta = Delta::synthesize(tombstones, union_len, old_deletes_from_union, new_deletes_from_union);
         let new_text = del_delta.apply(text);
-        // Taking the complement of deletes_from_union leads to an interleaving valid for swapped text and tombstones,
-        // allowing us to use the same method to insert the text into the tombstones.
-        let total_len = text.len() + tombstones.len();
-        let inverse_tombstones_map = old_deletes_from_union.complement(total_len);
-        let move_delta = Delta::synthesize(text, &inverse_tombstones_map, union_len,
-            &inverse_tombstones_map, &new_deletes_from_union.complement(total_len));
-        let new_tombstones = move_delta.apply(tombstones);
-        (new_text, new_tombstones)
+        (new_text, Engine::shuffle_tombstones(text,tombstones,old_deletes_from_union,new_deletes_from_union))
     }
 
     pub fn edit_rev(&mut self, priority: usize, undo_group: usize,
