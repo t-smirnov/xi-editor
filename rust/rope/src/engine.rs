@@ -208,6 +208,7 @@ impl Engine {
             }
         }, new_text, new_tombstones)
     }
+
     /// Move sections from text to tombstones and out of tombstones based on a new and old set of deletions
     fn shuffle_tombstones(text: &Rope, tombstones: &Rope,
             old_deletes_from_union: &Subset, new_deletes_from_union: &Subset) -> Rope {
@@ -273,6 +274,14 @@ impl Engine {
 
     pub fn undo(&mut self, groups: BTreeSet<usize>) {
         let new_rev = self.compute_undo(groups);
+
+        let (new_text, new_tombstones) = {
+            let cur_deletes_from_union = &self.revs.last().unwrap().deletes_from_union;
+            Engine::shuffle(&self.text, &self.tombstones, cur_deletes_from_union, &new_rev.deletes_from_union)
+        };
+
+        self.text = new_text;
+        self.tombstones = new_tombstones;
         self.revs.push(new_rev);
         self.rev_id_counter += 1;
     }
@@ -432,27 +441,32 @@ mod tests {
         assert_eq!("0!3456789abcDEEFGIjklmnopqr888999stuvHIz", String::from(engine.get_head()));
     }
 
-    fn edit_rev_undo_test(undos : BTreeSet<usize>, output: &str) {
+    fn undo_test(before: bool, undos : BTreeSet<usize>, output: &str) {
         let mut engine = Engine::new(Rope::from(TEST_STR));
-        engine.undo(undos);
+        if before {
+            engine.undo(undos.clone());
+        }
         engine.edit_rev(1, 0, 0, build_delta_1());
         engine.edit_rev(0, 1, 0, build_delta_2());
+        if !before {
+            engine.undo(undos);
+        }
         assert_eq!(output, String::from(engine.get_head()));
     }
 
     #[test]
     fn edit_rev_undo() {
-        edit_rev_undo_test([0,1].iter().cloned().collect(), TEST_STR);
+        undo_test(true, [0,1].iter().cloned().collect(), TEST_STR);
     }
 
     #[test]
     fn edit_rev_undo_2() {
-        edit_rev_undo_test([1].iter().cloned().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
+        undo_test(true, [1].iter().cloned().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
     }
 
     #[test]
     fn edit_rev_undo_3() {
-        edit_rev_undo_test([0].iter().cloned().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
+        undo_test(true, [0].iter().cloned().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
     }
 
     #[test]
@@ -479,5 +493,20 @@ mod tests {
         engine.edit_rev(0, 1, 0, build_delta_2());
         let d = engine.delta_rev_head(1);
         assert_eq!(String::from(engine.get_head()), d.apply_to_string("0123456789abcDEEFghijklmnopqr999stuvz"));
+    }
+
+    #[test]
+    fn undo() {
+        undo_test(false, [0,1].iter().cloned().collect(), TEST_STR);
+    }
+
+    #[test]
+    fn undo_2() {
+        undo_test(false, [1].iter().cloned().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
+    }
+
+    #[test]
+    fn undo_3() {
+        undo_test(false, [0].iter().cloned().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
     }
 }
