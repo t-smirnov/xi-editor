@@ -25,6 +25,7 @@ use rope::{Rope, RopeInfo};
 use subset::Subset;
 use delta::Delta;
 
+#[derive(Debug)]
 pub struct Engine {
     rev_id_counter: usize,
     text: Rope,
@@ -32,6 +33,7 @@ pub struct Engine {
     revs: Vec<Revision>,
 }
 
+#[derive(Debug)]
 struct Revision {
     rev_id: usize,
     deletes_from_union: Subset,
@@ -41,6 +43,7 @@ struct Revision {
 
 use self::Contents::*;
 
+#[derive(Debug)]
 enum Contents {
     Edit {
         priority: usize,
@@ -336,7 +339,7 @@ impl Engine {
         if !gc_dels.is_empty() {
             let head_rev = &self.revs.last().unwrap();
             let not_in_tombstones = head_rev.deletes_from_union.complement(head_rev.union_str_len);
-            let dels_from_tombstones = gc_dels.transform_shrink(&not_in_tombstones);
+            let dels_from_tombstones = not_in_tombstones.transform_shrink(&gc_dels);
             self.tombstones = dels_from_tombstones.delete_from(&self.tombstones);
         }
         let old_revs = std::mem::replace(&mut self.revs, Vec::new());
