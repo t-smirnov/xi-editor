@@ -525,4 +525,21 @@ mod tests {
         engine.undo([0,2].iter().cloned().collect());
         assert_eq!("a0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
+
+    #[test]
+    fn gc() {
+        let mut engine = Engine::new(Rope::from(TEST_STR));
+        let d1 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("a"), TEST_STR.len());
+        engine.edit_rev(1, 0, 0, d1.clone());
+        engine.undo([0].iter().cloned().collect());
+        let d2 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("a"), TEST_STR.len()+1);
+        engine.edit_rev(1, 1, 1, d2);
+        let gc : BTreeSet<usize> = [0].iter().cloned().collect();
+        engine.gc(&gc);
+        let d3 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("b"), TEST_STR.len()+2);
+        let new_head = engine.get_head_rev_id();
+        engine.edit_rev(1, 2, new_head, d3);
+        engine.undo([2].iter().cloned().collect());
+        assert_eq!("a0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
+    }
 }
