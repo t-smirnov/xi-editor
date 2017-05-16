@@ -542,4 +542,61 @@ mod tests {
         engine.undo([2].iter().cloned().collect());
         assert_eq!("a0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
+
+    /// This case is a regression test reproducing a panic I found while using the UI.
+    /// It does undos and gcs in a pattern that can actually happen when using the editor.
+    fn gc_scenario(edits: usize, max_undos: usize) {
+        let mut engine = Engine::new(Rope::from(""));
+
+        // insert `edits` letter "b"s in separate undo groups
+        for i in 0..edits {
+            let d = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("b"), i);
+            let head = engine.get_head_rev_id();
+            engine.edit_rev(1, i, head, d);
+            if i >= max_undos {
+                let to_gc : BTreeSet<usize> = [i-max_undos].iter().cloned().collect();
+                engine.gc(&to_gc)
+            }
+        }
+
+        // spam cmd+z until the available undo history is exhausted
+        let mut to_undo = BTreeSet::new();
+        for i in ((edits-max_undos)..edits).rev() {
+            to_undo.insert(i);
+            engine.undo(to_undo.clone());
+        }
+
+        // insert a character at the beginning
+        let d1 = Delta::simple_edit(Interval::new_closed_open(0,0), Rope::from("h"), engine.get_head().len());
+        let head = engine.get_head_rev_id();
+        engine.edit_rev(1, edits, head, d1);
+
+        // since character was inserted after gc, editor gcs all undone things
+        engine.gc(&to_undo);
+
+        // insert character at end, when this test was added, it panic'd here
+        let chars_left = (edits-max_undos)+1;
+        let d2 = Delta::simple_edit(Interval::new_closed_open(chars_left, chars_left), Rope::from("f"), engine.get_head().len());
+        let head2 = engine.get_head_rev_id();
+        engine.edit_rev(1, edits, head2, d2);
+
+        let mut soln = String::from("h");
+        for _ in 0..(edits-max_undos) {
+            soln.push('b');
+        }
+        soln.push('f');
+        assert_eq!(soln, String::from(engine.get_head()));
+    }
+
+    #[test]
+    fn gc_2() {
+        // the smallest values with which it still fails:
+        gc_scenario(4,3);
+    }
+
+    #[test]
+    fn gc_3() {
+        // original values this test was created/found with in the UI:
+        gc_scenario(35,20);
+    }
 }
